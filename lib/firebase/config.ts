@@ -1,19 +1,21 @@
-import { initializeApp, getApps } from "firebase/app";
+import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { getStorage } from "firebase/storage";
 
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  apiKey: "AIzaSyAgQlxOQl86VUuMKODvPsAJKK4Yubf4WiU",
+  authDomain: "liga-futbol-sca.firebaseapp.com",
+  projectId: "liga-futbol-sca",
+  storageBucket: "liga-futbol-sca.firebasestorage.app",
+  messagingSenderId: "358837702042",
+  appId: "1:358837702042:web:2672d9c3604dc881bc7e23",
+  measurementId: "G-6P4431KGVB"
 };
 
-// Inicializar Firebase (evita errores de duplicados al recargar la página)
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+// Singleton pattern para evitar inicializar múltiples veces
+const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 export const db = getFirestore(app);
 export const auth = getAuth(app);
