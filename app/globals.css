@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000; /* Lo cambiamos a negro para que combine con tu nuevo diseño Tesla/Hennessy */
+  --foreground: #ffffff;
+  --card: #1c1c1e; /* Gris oscuro estilo Apple Dark Mode */
+  --apple-blue: #007AFF;
+}
+
+/* CONFIGURACIÓN DE SCROLL ESTILO IPHONE */
+html {
+  scroll-behavior: smooth;
+  /* Elimina el rebote elástico blanco en navegadores móviles */
+  overscroll-behavior-y: none; 
+  /* Asegura que el scroll se sienta "pesado" y fluido como en iOS */
+  -webkit-overflow-scrolling: touch;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* Evita que el usuario pueda seleccionar texto por accidente al hacer scroll rápido */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* EFECTO VIDRIO APPLE (Glassmorphism) */
+.glass {
+  background: rgba(0, 0, 0, 0.5); /* Oscurecido para tu nuevo tema */
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ANIMACIONES SUAVES */
+.tap-effect:active {
+  transform: scale(0.96);
+  transition: transform 0.1s ease-out;
+}
+
+/* Ocultar la barra de scroll para una experiencia más inmersiva (opcional) */
+::-webkit-scrollbar {
+  display: none;
+}
