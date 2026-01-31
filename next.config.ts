@@ -1,4 +1,3 @@
-/** @type {import('next').NextConfig} */
 const withPWA = require('next-pwa')({
   dest: 'public',
   register: true,
@@ -6,13 +5,15 @@ const withPWA = require('next-pwa')({
   disable: process.env.NODE_ENV === 'development',
 });
 
+/** @type {import('next').NextConfig} */
 const nextConfig = {
+  // 👇 ESTA ES LA LÍNEA MÁGICA QUE PIDE EL ERROR
+  turbopack: {}, 
+  
   typescript: {
-    // Ignoramos errores de tipo para que Vercel no se queje
     ignoreBuildErrors: true,
   },
   eslint: {
-    // Ignoramos errores de estilo
     ignoreDuringBuilds: true,
   }
 };
