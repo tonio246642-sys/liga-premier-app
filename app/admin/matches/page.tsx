@@ -17,7 +17,7 @@ export default function MatchesPage() {
   const [teams, setTeams] = useState<any[]>([]);
   const [matches, setMatches] = useState<any[]>([]);
   
-  // Estado del Formulario (Paso 3.7)
+  // Estado del Formulario
   const [localTeamId, setLocalTeamId] = useState('');
   const [awayTeamId, setAwayTeamId] = useState('');
   const [matchDate, setMatchDate] = useState('');
@@ -35,19 +35,29 @@ export default function MatchesPage() {
     fetchTournaments();
   }, []);
 
-  // 2. Cargar Jornadas y Equipos del torneo seleccionado
+  // 2. Cargar Jornadas y Equipos
   useEffect(() => {
     if (selectedTourId) {
       const fetchContext = async () => {
+        // Cargar Jornadas
         const mq = query(collection(db, 'matchdays'), where('tournamentId', '==', selectedTourId));
         const mSnap = await getDocs(mq);
-        const sortedMatchdays = mSnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a:any, b:any) => a.number - b.number);
+        const sortedMatchdays = mSnap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a:any, b:any) => a.number - b.number);
         setMatchdays(sortedMatchdays);
 
+        // Cargar Equipos (Filtrados y Ordenados Alfabéticamente)
         const tour = tournaments.find(t => t.id === selectedTourId);
         const tSnap = await getDocs(collection(db, 'teams'));
         const allTeams = tSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setTeams(allTeams.filter(t => tour.teamIds.includes(t.id)));
+        
+        // Filtramos solo los del torneo y ordenamos A-Z
+        const tourTeams = allTeams
+            .filter(t => tour.teamIds.includes(t.id))
+            .sort((a:any, b:any) => a.name.localeCompare(b.name));
+            
+        setTeams(tourTeams);
         
         if (tour.type === 'round_robin') setGroupId('General');
       };
@@ -55,7 +65,7 @@ export default function MatchesPage() {
     }
   }, [selectedTourId, tournaments]);
 
-  // 3. Cargar partidos de la jornada seleccionada
+  // 3. Cargar partidos
   useEffect(() => {
     if (selectedMatchdayId) {
       fetchMatches();
@@ -70,12 +80,14 @@ export default function MatchesPage() {
     setMatches(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   };
 
+  // --- FUNCIÓN EDITADA PARA NOTIFICACIONES ---
   const createMatch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (localTeamId === awayTeamId) return alert("Error: El equipo local y visitante no pueden ser el mismo.");
     setLoading(true);
 
     try {
+      // 1. Guardar en Base de Datos
       await addDoc(collection(db, 'matches'), {
         tournamentId: selectedTourId,
         matchdayId: selectedMatchdayId,
@@ -84,15 +96,37 @@ export default function MatchesPage() {
         date: matchDate,
         field,
         groupId, 
-        status: 'scheduled', // [cite: 96, 279]
-        localGoals: 0, // [cite: 97]
-        awayGoals: 0, // [cite: 98]
+        status: 'scheduled',
+        localGoals: 0,
+        awayGoals: 0,
         createdAt: serverTimestamp()
       });
-      alert("Partido programado exitosamente.");
-      setLocalTeamId(''); setAwayTeamId('');
+
+      // 2. Enviar Notificación Push (NUEVO)
+      // Buscamos los nombres para el mensaje
+      const localName = teams.find(t => t.id === localTeamId)?.name || 'Local';
+      const awayName = teams.find(t => t.id === awayTeamId)?.name || 'Visitante';
+      
+      await fetch('/api/notify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: '📅 Nuevo Partido Programado',
+          message: `${localName} vs ${awayName} - ${new Date(matchDate).toLocaleDateString('es-MX', { weekday: 'short', hour: '2-digit', minute:'2-digit'})}`,
+        })
+      });
+
+      alert("Partido programado y notificación enviada.");
+      
+      // Limpiar formulario
+      setLocalTeamId(''); 
+      setAwayTeamId('');
       fetchMatches();
-    } catch (error) { console.error(error); }
+
+    } catch (error) { 
+        console.error(error); 
+        alert("El partido se creó, pero hubo un error con la notificación.");
+    }
     setLoading(false);
   };
 
@@ -154,8 +188,15 @@ export default function MatchesPage() {
               <input type="text" className="w-full p-2 border rounded-lg" value={field} onChange={e => setField(e.target.value)} placeholder="Ej: Campo Central" required />
             </div>
 
-            <button disabled={loading} className="md:col-span-2 bg-blue-600 text-white py-4 rounded-xl font-black text-lg hover:bg-blue-700 transition shadow-lg">
-              {loading ? 'REGISTRANDO...' : 'PROGRAMAR ENCUENTRO'}
+            <button disabled={loading} className="md:col-span-2 bg-blue-600 text-white py-4 rounded-xl font-black text-lg hover:bg-blue-700 transition shadow-lg flex justify-center items-center gap-2">
+              {loading ? 'ENVIANDO...' : (
+                <>
+                 <span>PROGRAMAR Y NOTIFICAR</span>
+                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
+                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                 </svg>
+                </>
+              )}
             </button>
           </form>
 

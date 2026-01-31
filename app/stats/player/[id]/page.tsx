@@ -12,8 +12,6 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
   
   const [player, setPlayer] = useState<any>(null);
   const [team, setTeam] = useState<any>(null);
-  
-  // NUEVO: Estados para filtrar por torneo
   const [tournaments, setTournaments] = useState<any[]>([]);
   const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
 
@@ -27,12 +25,11 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
       try {
         setLoading(true);
 
-        // 1. CARGAR TORNEOS (Para el filtro)
+        // 1. CARGAR TORNEOS
         const tournamentsSnap = await getDocs(collection(db, 'tournaments'));
         const tournamentsList = tournamentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setTournaments(tournamentsList);
         
-        // Si no hay torneo seleccionado y existen torneos, seleccionar el primero por defecto
         let currentTournamentId = selectedTournamentId;
         if (tournamentsList.length > 0 && !currentTournamentId) {
             currentTournamentId = tournamentsList[0].id;
@@ -53,7 +50,7 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
           playerData = { id, name: 'Jugador', number: '?', photoUrl: null }; 
         }
 
-        // 4. CALCULAR ESTADÍSTICAS (FILTRADAS POR TORNEO)
+        // 4. CALCULAR ESTADÍSTICAS (OPTIMIZADO CON PROMISE.ALL)
         let matchesQuery;
         if (currentTournamentId) {
             matchesQuery = query(
@@ -67,53 +64,75 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
 
         const matchesSnap = await getDocs(matchesQuery);
         
-        let totalGoals = 0;
-        let matchesPlayed = 0;
-        const history: any[] = [];
         let discoveredTeamId = playerData.teamId;
 
-        for (const matchDoc of matchesSnap.docs) {
-          const match = matchDoc.data();
-          const eventsSnap = await getDocs(collection(db, `matches/${matchDoc.id}/events`));
-          
-          let playedInMatch = false;
-          let goalsInMatch = 0;
+        // --- INICIO DE LA OPTIMIZACIÓN ---
+        // En lugar de un bucle for (secuencial), creamos un array de promesas (paralelo)
+        const matchPromises = matchesSnap.docs.map(async (matchDoc) => {
+            const match = matchDoc.data();
+            // Pedimos los eventos de este partido
+            const eventsSnap = await getDocs(collection(db, `matches/${matchDoc.id}/events`));
+            
+            let playedInMatch = false;
+            let goalsInMatch = 0;
+            let foundPlayerName = null;
+            let foundTeamId = null;
 
-          eventsSnap.forEach(eventDoc => {
-            const event = eventDoc.data();
-            if (event.playerId === id) {
-              playedInMatch = true;
-              if (!discoveredTeamId) discoveredTeamId = event.teamId;
-              if (playerData.name === 'Jugador' && event.playerName) playerData.name = event.playerName;
+            eventsSnap.forEach(eventDoc => {
+                const event = eventDoc.data();
+                if (event.playerId === id) {
+                    playedInMatch = true;
+                    if (event.teamId) foundTeamId = event.teamId;
+                    if (event.playerName) foundPlayerName = event.playerName;
 
-              if (event.type === 'goal') {
-                totalGoals++;
-                goalsInMatch++;
-              }
+                    if (event.type === 'goal') {
+                        goalsInMatch++;
+                    }
+                }
+            });
+
+            if (playedInMatch) {
+                const currentTeamId = foundTeamId || playerData.teamId;
+                const rivalId = (match.localTeamId === currentTeamId) ? match.awayTeamId : match.localTeamId;
+                const rivalName = teamsMap[rivalId]?.name || 'Rival';
+
+                return {
+                    matchId: matchDoc.id,
+                    date: match.date,
+                    rivalName: rivalName,
+                    goals: goalsInMatch,
+                    result: `${match.localGoals}-${match.awayGoals}`,
+                    foundTeamId,
+                    foundPlayerName
+                };
             }
-          });
+            return null; // Si no jugó, devolvemos null
+        });
 
-          if (playedInMatch) {
-            matchesPlayed++;
-            const currentTeamId = discoveredTeamId || playerData.teamId;
-            const rivalId = (match.localTeamId === currentTeamId) ? match.awayTeamId : match.localTeamId;
-            const rivalName = teamsMap[rivalId]?.name || 'Rival';
+        // Esperamos a que TODAS las peticiones terminen a la vez (mucho más rápido)
+        const results = await Promise.all(matchPromises);
 
-            if (goalsInMatch > 0) {
-              history.push({
-                matchId: matchDoc.id,
-                date: match.date,
-                rivalName: rivalName,
-                goals: goalsInMatch,
-                result: `${match.localGoals}-${match.awayGoals}`
-              });
+        // Procesamos los resultados
+        const history: any[] = [];
+        let totalGoals = 0;
+        let matchesPlayed = 0;
+
+        results.forEach(res => {
+            if (res) { // Si jugó en este partido
+                matchesPlayed++;
+                totalGoals += res.goals;
+                history.push(res);
+                
+                // Actualizamos datos globales si los encontramos
+                if (!discoveredTeamId && res.foundTeamId) discoveredTeamId = res.foundTeamId;
+                if (playerData.name === 'Jugador' && res.foundPlayerName) playerData.name = res.foundPlayerName;
             }
-          }
-        }
+        });
+        // --- FIN DE LA OPTIMIZACIÓN ---
 
         if (discoveredTeamId && !playerData.teamId) playerData.teamId = discoveredTeamId;
 
-        setPlayer(playerData);
+        setPlayer({ ...playerData }); // Forzamos actualización
         setStats({ goals: totalGoals, matches: matchesPlayed });
         setMatchHistory(history.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
@@ -124,9 +143,9 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
       } catch (error) { console.error(error); } finally { setLoading(false); }
     };
     fetchPlayerData();
-  }, [id, selectedTournamentId]); // Se recarga cuando cambia el ID o el Torneo seleccionado
+  }, [id, selectedTournamentId]);
 
-  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center font-sans text-xs text-white/20 uppercase tracking-widest animate-pulse">Cargando...</div>;
+  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center font-sans text-xs text-white/20 uppercase tracking-widest animate-pulse">Cargando perfil...</div>;
 
   return (
     <div className="min-h-screen bg-black text-white font-sans antialiased pb-20 selection:bg-blue-500 selection:text-white">
@@ -173,7 +192,7 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
 
       <main className="px-4 max-w-md mx-auto space-y-6">
         
-        {/* SELECTOR DE TORNEO (AQUÍ ESTÁ LA MAGIA) */}
+        {/* SELECTOR DE TORNEO */}
         {tournaments.length > 1 && (
             <div className="flex flex-wrap justify-center gap-2">
                 {tournaments.map(t => (
@@ -227,17 +246,17 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
                     <div className="flex flex-col">
                       <span className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">Contra</span>
                       <span className="text-sm font-black text-white tracking-wide uppercase truncate">
-                         {historyItem.rivalName}
+                          {historyItem.rivalName}
                       </span>
                     </div>
                   </div>
                   <div className="flex flex-col items-end">
-                     <div className="inline-flex items-center gap-1 bg-blue-600 px-3 py-1 rounded-full text-white text-[10px] font-bold uppercase tracking-widest shadow-lg">
+                      <div className="inline-flex items-center gap-1 bg-blue-600 px-3 py-1 rounded-full text-white text-[10px] font-bold uppercase tracking-widest shadow-lg">
                         +{historyItem.goals} {historyItem.goals > 1 ? 'Goles' : 'Gol'}
-                     </div>
-                     <span className="text-[8px] font-medium text-gray-600 mt-1 tracking-wider">
+                      </div>
+                      <span className="text-[8px] font-medium text-gray-600 mt-1 tracking-wider">
                         {historyItem.result}
-                     </span>
+                      </span>
                   </div>
                 </div>
               ))
