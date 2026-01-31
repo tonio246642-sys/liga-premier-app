@@ -4,9 +4,8 @@ import { useState, useEffect, use } from 'react';
 import { db } from '@/lib/firebase/config';
 import { 
   doc, getDoc, collection, getDocs, query, where, 
-  collectionGroup // <--- IMPORTANTE: Importamos esto
+  collectionGroup 
 } from 'firebase/firestore';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 export default function PlayerDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -23,141 +22,153 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const initData = async () => {
+        // Carga inicial de torneos y equipos (muy ligera)
+        try {
+            const [tourSnap, teamsSnap] = await Promise.all([
+                getDocs(collection(db, 'tournaments')),
+                getDocs(collection(db, 'teams'))
+            ]);
+
+            const toursList = tourSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            setTournaments(toursList);
+            
+            // Auto-seleccionar el primer torneo si no hay uno
+            if (toursList.length > 0 && !selectedTournamentId) {
+                setSelectedTournamentId(toursList[0].id);
+            }
+        } catch (e) { console.error(e); }
+    };
+    initData();
+  }, []);
+
+  // Efecto Principal: Se dispara cuando cambia el ID o el Torneo
+  useEffect(() => {
     const fetchPlayerData = async () => {
-      if (!id) return;
+      if (!id || !selectedTournamentId) return; // Esperamos a tener torneo seleccionado
+      
       try {
         setLoading(true);
 
-        // 1. CARGAR TORNEOS
-        const tournamentsSnap = await getDocs(collection(db, 'tournaments'));
-        const tournamentsList = tournamentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setTournaments(tournamentsList);
+        // --- ESTRATEGIA DE 3 PETICIONES SIMULTÁNEAS (PARALELO) ---
+        // El celular descarga todo a la vez, aprovechando el ancho de banda
         
-        // Seleccionar torneo por defecto si no hay uno
-        let currentTournamentId = selectedTournamentId;
-        if (tournamentsList.length > 0 && !currentTournamentId) {
-            currentTournamentId = tournamentsList[0].id;
-            setSelectedTournamentId(currentTournamentId);
-        }
+        const [playerSnap, matchesSnap, eventsSnap, teamsSnap] = await Promise.all([
+            // 1. Datos del Jugador
+            getDoc(doc(db, 'teamPlayers', id)),
+            
+            // 2. Todos los partidos DEL TORNEO (Ya jugados)
+            getDocs(query(
+                collection(db, 'matches'),
+                where('tournamentId', '==', selectedTournamentId),
+                where('status', '==', 'played')
+            )),
 
-        // 2. CARGAR TODOS LOS EQUIPOS (Para tener los nombres a la mano)
-        const teamsSnap = await getDocs(collection(db, 'teams'));
+            // 3. Todos los eventos DEL JUGADOR (Usando el índice que creaste)
+            getDocs(query(
+                collectionGroup(db, 'events'),
+                where('playerId', '==', id)
+            )),
+
+            // 4. Equipos (si no se cargaron antes, o para asegurar tener el mapa)
+            getDocs(collection(db, 'teams'))
+        ]);
+
+        // --- PROCESAMIENTO EN MEMORIA (INSTANTÁNEO) ---
+
+        // A. Mapa de Equipos
         const teamsMap: any = {};
         teamsSnap.forEach(doc => { teamsMap[doc.id] = doc.data(); });
 
-        // 3. CARGAR DATOS DEL JUGADOR
-        let playerData: any = null;
-        const playerSnap = await getDoc(doc(db, 'teamPlayers', id));
-        if (playerSnap.exists()) {
-          playerData = { id: playerSnap.id, ...playerSnap.data() };
-        } else {
-          playerData = { id, name: 'Jugador', number: '?', photoUrl: null }; 
-        }
+        // B. Datos Básicos Jugador
+        let playerData: any = playerSnap.exists() 
+            ? { id: playerSnap.id, ...playerSnap.data() }
+            : { id, name: 'Jugador', number: '?', photoUrl: null };
 
-        // -----------------------------------------------------------
-        // 4. ESTRATEGIA OPTIMIZADA (COLLECTION GROUP)
-        // Buscamos DIRECTAMENTE los eventos del jugador en toda la base de datos
-        // -----------------------------------------------------------
-        
-        // Esta consulta busca en TODAS las colecciones llamadas 'events' donde el playerId sea el nuestro
-        const eventsQuery = query(
-            collectionGroup(db, 'events'), 
-            where('playerId', '==', id)
-        );
-        
-        const eventsSnap = await getDocs(eventsQuery);
-
-        // Agrupamos los eventos por partido (MatchID)
-        // Usamos un Map para no repetir partidos y sumar goles
-        const matchesMap = new Map();
-
-        eventsSnap.forEach((docSnap) => {
-            // Truco: El padre del evento es la colección 'events', y el padre de esa colección es el Partido (Match)
-            // ref.parent.parent.id nos da el ID del partido sin tener que consultarlo
-            const matchRef = docSnap.ref.parent.parent;
-            if (!matchRef) return;
-            const matchId = matchRef.id;
-            const eventData = docSnap.data();
-
-            if (!matchesMap.has(matchId)) {
-                matchesMap.set(matchId, {
-                    goals: 0,
-                    events: [],
-                    matchId: matchId,
-                    teamId: eventData.teamId, // Guardamos el equipo donde jugó
-                    playerName: eventData.playerName // Guardamos el nombre si aparece
-                });
-            }
-
-            const currentMatch = matchesMap.get(matchId);
-            if (eventData.type === 'goal') {
-                currentMatch.goals += 1;
-            }
-            
-            // Actualizamos datos si los encontramos en el evento
-            if (eventData.teamId) currentMatch.teamId = eventData.teamId;
-            if (eventData.playerName) currentMatch.playerName = eventData.playerName;
+        // C. Mapa de Partidos del Torneo (Para acceso rápido)
+        const tournamentMatchesMap = new Map();
+        matchesSnap.forEach(doc => {
+            tournamentMatchesMap.set(doc.id, { id: doc.id, ...doc.data() });
         });
 
-        // 5. AHORA SÍ, DESCARGAMOS SOLO LOS PARTIDOS DONDE JUGÓ (Son poquitos)
+        // D. Procesar Eventos y Cruzar con Partidos
         const history: any[] = [];
+        const processedMatchIds = new Set(); // Para no contar doble partido si metió 2 goles
         let totalGoals = 0;
         let matchesPlayed = 0;
         let discoveredTeamId = playerData.teamId;
 
-        // Convertimos el Map a un array de promesas para buscar los detalles de cada partido
-        const matchPromises = Array.from(matchesMap.values()).map(async (item: any) => {
-            const matchDoc = await getDoc(doc(db, 'matches', item.matchId));
-            if (matchDoc.exists()) {
-                const matchData = matchDoc.data();
-                
-                // FILTRO DE TORNEO: Solo procesamos si pertenece al torneo seleccionado
-                if (currentTournamentId && matchData.tournamentId !== currentTournamentId) {
-                    return null;
+        eventsSnap.forEach((eventDoc) => {
+            // Truco: Obtenemos el ID del partido desde la referencia del evento
+            // events -> {eventId} -> parent -> matches -> {matchId}
+            const matchRef = eventDoc.ref.parent.parent;
+            if (!matchRef) return;
+            const matchId = matchRef.id;
+
+            // SOLO procesamos si el partido pertenece al torneo seleccionado
+            if (tournamentMatchesMap.has(matchId)) {
+                const matchData = tournamentMatchesMap.get(matchId);
+                const eventData = eventDoc.data();
+
+                // Actualizar info del jugador si la encontramos en el evento
+                if (eventData.playerName && playerData.name === 'Jugador') playerData.name = eventData.playerName;
+                if (eventData.teamId && !discoveredTeamId) discoveredTeamId = eventData.teamId;
+
+                // Contar goles
+                if (eventData.type === 'goal') {
+                    totalGoals++;
                 }
 
-                // Si el partido no se ha jugado ("played"), no lo contamos en stats
-                if (matchData.status !== 'played') return null;
-
-                const currentTeamId = item.teamId || playerData.teamId;
-                const rivalId = (matchData.localTeamId === currentTeamId) ? matchData.awayTeamId : matchData.localTeamId;
-                const rivalName = teamsMap[rivalId]?.name || 'Rival';
-
-                return {
-                    matchId: item.matchId,
-                    date: matchData.date,
-                    rivalName: rivalName,
-                    goals: item.goals,
-                    result: `${matchData.localGoals}-${matchData.awayGoals}`,
-                    teamId: item.teamId,
-                    playerName: item.playerName
-                };
-            }
-            return null;
-        });
-
-        const results = await Promise.all(matchPromises);
-
-        results.forEach(res => {
-            if (res) {
-                matchesPlayed++;
-                totalGoals += res.goals;
-                history.push(res);
-
-                // Actualizar info del jugador si la encontramos
-                if (!discoveredTeamId && res.teamId) discoveredTeamId = res.teamId;
-                if (playerData.name === 'Jugador' && res.playerName) playerData.name = res.playerName;
+                // Si es la primera vez que vemos este partido en el bucle, lo agregamos al historial
+                // (Pero necesitamos sumar los goles de este partido específico, así que usamos un mapa temporal)
             }
         });
 
+        // RE-PROCESAMIENTO PARA AGRUPAR GOLES POR PARTIDO
+        // Como el bucle anterior va evento por evento, ahora agrupamos por partido
+        const matchesStats = new Map();
+
+        eventsSnap.forEach((eventDoc) => {
+            const matchId = eventDoc.ref.parent?.parent?.id;
+            if (matchId && tournamentMatchesMap.has(matchId)) {
+                const eventData = eventDoc.data();
+                
+                if (!matchesStats.has(matchId)) {
+                    matchesStats.set(matchId, { goals: 0, matchData: tournamentMatchesMap.get(matchId) });
+                }
+                
+                if (eventData.type === 'goal') {
+                    matchesStats.get(matchId).goals += 1;
+                }
+            }
+        });
+
+        // Generar Array Final
+        matchesStats.forEach((value, key) => {
+            const m = value.matchData;
+            const currentTeamId = discoveredTeamId || playerData.teamId;
+            const rivalId = (m.localTeamId === currentTeamId) ? m.awayTeamId : m.localTeamId;
+            const rivalName = teamsMap[rivalId]?.name || 'Rival';
+
+            matchesPlayed++;
+            history.push({
+                matchId: m.id,
+                date: m.date,
+                rivalName: rivalName,
+                goals: value.goals,
+                result: `${m.localGoals}-${m.awayGoals}`
+            });
+        });
+
+        // E. Guardar Estados
         if (discoveredTeamId && !playerData.teamId) playerData.teamId = discoveredTeamId;
-
-        setPlayer({ ...playerData });
+        
+        setPlayer(playerData);
         setStats({ goals: totalGoals, matches: matchesPlayed });
         setMatchHistory(history.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
-
+        
         if (playerData.teamId && teamsMap[playerData.teamId]) {
-          setTeam(teamsMap[playerData.teamId]);
+            setTeam(teamsMap[playerData.teamId]);
         }
 
       } catch (error) { 
@@ -166,13 +177,14 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
         setLoading(false); 
       }
     };
+    
     fetchPlayerData();
   }, [id, selectedTournamentId]);
 
   if (loading) return (
     <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-4">
         <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-        <div className="font-sans text-xs text-white/40 uppercase tracking-widest animate-pulse">Cargando estadísticas...</div>
+        <div className="font-sans text-xs text-white/40 uppercase tracking-widest animate-pulse">Cargando perfil...</div>
     </div>
   );
 
