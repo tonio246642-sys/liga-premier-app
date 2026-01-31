@@ -5,15 +5,13 @@ const withPWA = require('next-pwa')({
   dest: 'public',
   register: true,
   skipWaiting: true,
-  disable: process.env.NODE_ENV === 'development', // Desactiva en local para no molestar
+  disable: process.env.NODE_ENV === 'development', // Esto hace que salga el aviso "[PWA] disabled" en local, es normal.
 });
 
 const nextConfig: NextConfig = {
   /* config options here */
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
+    // Esto sí lo dejamos para que Vercel no se queje si hay errores de tipo
     ignoreBuildErrors: true,
   },
 };
