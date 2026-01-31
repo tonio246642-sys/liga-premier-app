@@ -2,7 +2,10 @@
 
 import { useState, useEffect, use } from 'react';
 import { db } from '@/lib/firebase/config';
-import { doc, getDoc, collection, getDocs, query, where } from 'firebase/firestore';
+import { 
+  doc, getDoc, collection, getDocs, query, where, 
+  collectionGroup // <--- IMPORTANTE: Importamos esto
+} from 'firebase/firestore';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
@@ -30,13 +33,14 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
         const tournamentsList = tournamentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setTournaments(tournamentsList);
         
+        // Seleccionar torneo por defecto si no hay uno
         let currentTournamentId = selectedTournamentId;
         if (tournamentsList.length > 0 && !currentTournamentId) {
             currentTournamentId = tournamentsList[0].id;
             setSelectedTournamentId(currentTournamentId);
         }
 
-        // 2. CARGAR TODOS LOS EQUIPOS
+        // 2. CARGAR TODOS LOS EQUIPOS (Para tener los nombres a la mano)
         const teamsSnap = await getDocs(collection(db, 'teams'));
         const teamsMap: any = {};
         teamsSnap.forEach(doc => { teamsMap[doc.id] = doc.data(); });
@@ -50,89 +54,105 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
           playerData = { id, name: 'Jugador', number: '?', photoUrl: null }; 
         }
 
-        // 4. CALCULAR ESTADÍSTICAS (OPTIMIZADO CON PROMISE.ALL)
-        let matchesQuery;
-        if (currentTournamentId) {
-            matchesQuery = query(
-                collection(db, 'matches'), 
-                where('status', '==', 'played'), 
-                where('tournamentId', '==', currentTournamentId)
-            );
-        } else {
-            matchesQuery = query(collection(db, 'matches'), where('status', '==', 'played'));
-        }
-
-        const matchesSnap = await getDocs(matchesQuery);
+        // -----------------------------------------------------------
+        // 4. ESTRATEGIA OPTIMIZADA (COLLECTION GROUP)
+        // Buscamos DIRECTAMENTE los eventos del jugador en toda la base de datos
+        // -----------------------------------------------------------
         
-        let discoveredTeamId = playerData.teamId;
+        // Esta consulta busca en TODAS las colecciones llamadas 'events' donde el playerId sea el nuestro
+        const eventsQuery = query(
+            collectionGroup(db, 'events'), 
+            where('playerId', '==', id)
+        );
+        
+        const eventsSnap = await getDocs(eventsQuery);
 
-        // --- INICIO DE LA OPTIMIZACIÓN ---
-        // En lugar de un bucle for (secuencial), creamos un array de promesas (paralelo)
-        const matchPromises = matchesSnap.docs.map(async (matchDoc) => {
-            const match = matchDoc.data();
-            // Pedimos los eventos de este partido
-            const eventsSnap = await getDocs(collection(db, `matches/${matchDoc.id}/events`));
-            
-            let playedInMatch = false;
-            let goalsInMatch = 0;
-            let foundPlayerName = null;
-            let foundTeamId = null;
+        // Agrupamos los eventos por partido (MatchID)
+        // Usamos un Map para no repetir partidos y sumar goles
+        const matchesMap = new Map();
 
-            eventsSnap.forEach(eventDoc => {
-                const event = eventDoc.data();
-                if (event.playerId === id) {
-                    playedInMatch = true;
-                    if (event.teamId) foundTeamId = event.teamId;
-                    if (event.playerName) foundPlayerName = event.playerName;
+        eventsSnap.forEach((docSnap) => {
+            // Truco: El padre del evento es la colección 'events', y el padre de esa colección es el Partido (Match)
+            // ref.parent.parent.id nos da el ID del partido sin tener que consultarlo
+            const matchRef = docSnap.ref.parent.parent;
+            if (!matchRef) return;
+            const matchId = matchRef.id;
+            const eventData = docSnap.data();
 
-                    if (event.type === 'goal') {
-                        goalsInMatch++;
-                    }
-                }
-            });
-
-            if (playedInMatch) {
-                const currentTeamId = foundTeamId || playerData.teamId;
-                const rivalId = (match.localTeamId === currentTeamId) ? match.awayTeamId : match.localTeamId;
-                const rivalName = teamsMap[rivalId]?.name || 'Rival';
-
-                return {
-                    matchId: matchDoc.id,
-                    date: match.date,
-                    rivalName: rivalName,
-                    goals: goalsInMatch,
-                    result: `${match.localGoals}-${match.awayGoals}`,
-                    foundTeamId,
-                    foundPlayerName
-                };
+            if (!matchesMap.has(matchId)) {
+                matchesMap.set(matchId, {
+                    goals: 0,
+                    events: [],
+                    matchId: matchId,
+                    teamId: eventData.teamId, // Guardamos el equipo donde jugó
+                    playerName: eventData.playerName // Guardamos el nombre si aparece
+                });
             }
-            return null; // Si no jugó, devolvemos null
+
+            const currentMatch = matchesMap.get(matchId);
+            if (eventData.type === 'goal') {
+                currentMatch.goals += 1;
+            }
+            
+            // Actualizamos datos si los encontramos en el evento
+            if (eventData.teamId) currentMatch.teamId = eventData.teamId;
+            if (eventData.playerName) currentMatch.playerName = eventData.playerName;
         });
 
-        // Esperamos a que TODAS las peticiones terminen a la vez (mucho más rápido)
-        const results = await Promise.all(matchPromises);
-
-        // Procesamos los resultados
+        // 5. AHORA SÍ, DESCARGAMOS SOLO LOS PARTIDOS DONDE JUGÓ (Son poquitos)
         const history: any[] = [];
         let totalGoals = 0;
         let matchesPlayed = 0;
+        let discoveredTeamId = playerData.teamId;
+
+        // Convertimos el Map a un array de promesas para buscar los detalles de cada partido
+        const matchPromises = Array.from(matchesMap.values()).map(async (item: any) => {
+            const matchDoc = await getDoc(doc(db, 'matches', item.matchId));
+            if (matchDoc.exists()) {
+                const matchData = matchDoc.data();
+                
+                // FILTRO DE TORNEO: Solo procesamos si pertenece al torneo seleccionado
+                if (currentTournamentId && matchData.tournamentId !== currentTournamentId) {
+                    return null;
+                }
+
+                // Si el partido no se ha jugado ("played"), no lo contamos en stats
+                if (matchData.status !== 'played') return null;
+
+                const currentTeamId = item.teamId || playerData.teamId;
+                const rivalId = (matchData.localTeamId === currentTeamId) ? matchData.awayTeamId : matchData.localTeamId;
+                const rivalName = teamsMap[rivalId]?.name || 'Rival';
+
+                return {
+                    matchId: item.matchId,
+                    date: matchData.date,
+                    rivalName: rivalName,
+                    goals: item.goals,
+                    result: `${matchData.localGoals}-${matchData.awayGoals}`,
+                    teamId: item.teamId,
+                    playerName: item.playerName
+                };
+            }
+            return null;
+        });
+
+        const results = await Promise.all(matchPromises);
 
         results.forEach(res => {
-            if (res) { // Si jugó en este partido
+            if (res) {
                 matchesPlayed++;
                 totalGoals += res.goals;
                 history.push(res);
-                
-                // Actualizamos datos globales si los encontramos
-                if (!discoveredTeamId && res.foundTeamId) discoveredTeamId = res.foundTeamId;
-                if (playerData.name === 'Jugador' && res.foundPlayerName) playerData.name = res.foundPlayerName;
+
+                // Actualizar info del jugador si la encontramos
+                if (!discoveredTeamId && res.teamId) discoveredTeamId = res.teamId;
+                if (playerData.name === 'Jugador' && res.playerName) playerData.name = res.playerName;
             }
         });
-        // --- FIN DE LA OPTIMIZACIÓN ---
 
         if (discoveredTeamId && !playerData.teamId) playerData.teamId = discoveredTeamId;
 
-        setPlayer({ ...playerData }); // Forzamos actualización
+        setPlayer({ ...playerData });
         setStats({ goals: totalGoals, matches: matchesPlayed });
         setMatchHistory(history.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
 
@@ -140,12 +160,21 @@ export default function PlayerDetailPage({ params }: { params: Promise<{ id: str
           setTeam(teamsMap[playerData.teamId]);
         }
 
-      } catch (error) { console.error(error); } finally { setLoading(false); }
+      } catch (error) { 
+        console.error("Error cargando perfil:", error); 
+      } finally { 
+        setLoading(false); 
+      }
     };
     fetchPlayerData();
   }, [id, selectedTournamentId]);
 
-  if (loading) return <div className="min-h-screen bg-black flex items-center justify-center font-sans text-xs text-white/20 uppercase tracking-widest animate-pulse">Cargando perfil...</div>;
+  if (loading) return (
+    <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-4">
+        <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <div className="font-sans text-xs text-white/40 uppercase tracking-widest animate-pulse">Cargando estadísticas...</div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-black text-white font-sans antialiased pb-20 selection:bg-blue-500 selection:text-white">
