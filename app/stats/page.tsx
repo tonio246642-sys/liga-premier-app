@@ -34,7 +34,6 @@ export default function StatsPage() {
             // Seleccionar por defecto
             let currentTournamentId = selectedTournamentId;
             if (tournamentsList.length > 0) {
-                // Si el seleccionado no está en la lista (cambió temp), reseteamos al primero
                 const exists = tournamentsList.find(t => t.id === currentTournamentId);
                 if (!currentTournamentId || !exists) {
                     currentTournamentId = tournamentsList[0].id;
@@ -60,23 +59,35 @@ export default function StatsPage() {
                 const matchesSnap = await getDocs(matchesQuery);
                 const playerGoals: any = {};
 
-                for (const matchDoc of matchesSnap.docs) {
-                    const eventsSnap = await getDocs(collection(db, `matches/${matchDoc.id}/events`));
+                // Usamos Promise.all para que sea más rápido al cargar los eventos
+                const eventsPromises = matchesSnap.docs.map(matchDoc => 
+                    getDocs(collection(db, `matches/${matchDoc.id}/events`))
+                );
+                
+                const eventsSnapshots = await Promise.all(eventsPromises);
+
+                eventsSnapshots.forEach(eventsSnap => {
                     eventsSnap.forEach(eventDoc => {
                         const event = eventDoc.data();
+                        
                         if (event.type === 'goal') {
-                        if (!playerGoals[event.playerId]) {
-                            playerGoals[event.playerId] = {
-                            id: event.playerId,
-                            name: event.playerName,
-                            teamId: event.teamId,
-                            goals: 0
-                            };
-                        }
-                        playerGoals[event.playerId].goals += 1;
+                            
+                            // --- FILTRO: SI ES UN JUGADOR NO REGISTRADO, LO SALTAMOS ---
+                            if (event.playerId === 'unknown' || !event.playerId) return; 
+                            // -----------------------------------------------------------
+
+                            if (!playerGoals[event.playerId]) {
+                                playerGoals[event.playerId] = {
+                                    id: event.playerId,
+                                    name: event.playerName,
+                                    teamId: event.teamId,
+                                    goals: 0
+                                };
+                            }
+                            playerGoals[event.playerId].goals += 1;
                         }
                     });
-                }
+                });
 
                 const sortedScorers = Object.values(playerGoals).sort((a: any, b: any) => b.goals - a.goals);
                 setScorers(sortedScorers);
@@ -90,7 +101,7 @@ export default function StatsPage() {
       }
     };
     fetchStats();
-  }, [selectedTournamentId]); // Se ejecuta al cambiar torneo
+  }, [selectedTournamentId]);
 
   return (
     <div className="min-h-screen bg-black text-white font-sans antialiased pb-20">
